@@ -4,7 +4,11 @@ import com.imd.ai_service.dto.EmployeeDTO;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+
+import java.util.stream.Collectors;
 
 @Service
 public class PerformanceReviewService {
@@ -13,20 +17,19 @@ public class PerformanceReviewService {
     private final WebClient.Builder webClientBuilder;
     private final String CRUD_SERVICE_URL = "http://crud-service";
 
-    public PerformanceReviewService(ChatClient.Builder chatClientBuilder, WebClient.Builder webClientBuilder) {
-        this.chatClient = chatClientBuilder.build();
+    public PerformanceReviewService(ChatClient chatClient, WebClient.Builder webClientBuilder) {
+        this.chatClient = chatClient;
         this.webClientBuilder = webClientBuilder;
     }
 
     public Mono<String> generateReview(Long employeeId) {
-        // 1. Faz a chamada não-blocante para o crud-service para obter os dados do funcionário
+        // Chamada reativa ao crud-service (executa no event-loop)
         return webClientBuilder.build().get()
                 .uri(CRUD_SERVICE_URL + "/employees/{id}", employeeId)
                 .retrieve()
                 .bodyToMono(EmployeeDTO.class)
-                // 2. Se o funcionário não for encontrado, lança um erro reativo
                 .switchIfEmpty(Mono.error(new RuntimeException("Employee not found with id: " + employeeId)))
-                // 3. Usa flatMap para encadear a próxima operação assíncrona: a chamada à IA
+
                 .flatMap(employee -> {
                     String promptMessage = String.format(
                             "Gere uma avaliação de desempenho hipotética e profissional para o funcionário a seguir. " +
@@ -35,12 +38,14 @@ public class PerformanceReviewService {
                             employee.getName(), employee.getPosition()
                     );
 
-                    String aiResponse = chatClient.prompt()
+                    Flux<String> aiCallFlux = chatClient.prompt()
                             .user(promptMessage)
-                            .call()
+                            .stream()
                             .content();
 
-                    return Mono.just(aiResponse);
+                    return aiCallFlux
+                            .collect(Collectors.joining())
+                            .publishOn(Schedulers.boundedElastic());
                 });
     }
 }
